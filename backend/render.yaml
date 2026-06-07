@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: youtube-automation-api
+    runtime: docker
+    plan: starter
+    healthCheckPath: /api/health
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: CORS_ORIGINS
+        sync: false
+      - key: MIN_WATCH_SECONDS
+        value: 30
+      - key: EXECUTION_MODE
+        value: sequential
+      - key: HEADLESS
+        value: true
+      - key: GOOGLE_DRIVE_FILE_ID
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
