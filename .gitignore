@@ -21,6 +21,7 @@ env/
 node_modules/
 frontend/dist/
 frontend/.env.local
+backend/static/
 
 # IDE
 .idea/

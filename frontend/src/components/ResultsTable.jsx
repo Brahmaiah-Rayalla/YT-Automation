@@ -13,8 +13,7 @@ export default function ResultsTable({ results }) {
           <thead>
             <tr>
               <th>Account Email</th>
-              <th>Video/Short Title</th>
-              <th>URL</th>
+              <th>Viewed Short</th>
               <th>Liked?</th>
               <th>Status</th>
               <th>Error</th>
@@ -24,17 +23,20 @@ export default function ResultsTable({ results }) {
             {results.map((row) => (
               <tr key={row.email} className={row.error ? "row-error" : ""}>
                 <td>{row.email}</td>
-                <td>{row.video_title || "—"}</td>
-                <td>
+                <td className="video-title-cell">
                   {row.video_url ? (
                     <a href={row.video_url} target="_blank" rel="noreferrer">
-                      Open
+                      {row.video_title || row.video_url}
                     </a>
                   ) : (
-                    "—"
+                    row.video_title || "—"
                   )}
                 </td>
-                <td>{row.liked ? "Yes" : "No"}</td>
+                <td>
+                  <span className={`liked-pill ${row.liked ? "liked-yes" : "liked-no"}`}>
+                    {row.liked ? "Yes" : "No"}
+                  </span>
+                </td>
                 <td>
                   <span className={`status-pill status-${row.status}`}>{row.status}</span>
                 </td>

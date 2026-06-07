@@ -11,10 +11,38 @@ class JobStatus(str, Enum):
     FAILED = "failed"
 
 
+class AccountCredentialsInput(BaseModel):
+    email: str
+    password: str
+
+
+class ShortPreview(BaseModel):
+    video_id: str
+    title: str
+    url: str
+    thumbnail_url: str | None = None
+
+
+class ShortsListRequest(BaseModel):
+    youtube_handle: str = Field(..., description="YouTube channel handle (e.g. @channelname)")
+    limit: int = Field(default=10, ge=1, le=20)
+
+
+class ShortsListResponse(BaseModel):
+    handle: str
+    shorts: list[ShortPreview]
+
+
 class WorkflowRequest(BaseModel):
     youtube_handle: str = Field(..., description="YouTube channel handle (e.g. @channelname)")
-    email: str | None = Field(default=None, description="Optional test account email")
-    password: str | None = Field(default=None, description="Optional test account password")
+    short_url: str = Field(..., description="Selected Short URL to view and like")
+    account_mode: Literal["single", "multi"]
+    email: str | None = Field(default=None, description="Single account email")
+    password: str | None = Field(default=None, description="Single account password")
+    accounts: list[AccountCredentialsInput] | None = Field(
+        default=None,
+        description="Multiple accounts for multi mode",
+    )
     execution_mode: Literal["sequential", "parallel"] | None = None
 
 

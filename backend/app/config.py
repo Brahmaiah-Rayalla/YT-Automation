@@ -15,7 +15,8 @@ class Settings(BaseSettings):
 
     port: int = 8000
     cors_origins: str = "http://localhost:5173,http://localhost:3000"
-    min_watch_seconds: int = 30
+    min_watch_seconds: int = 15
+    serve_frontend: bool = True
     execution_mode: Literal["sequential", "parallel"] = "sequential"
     headless: bool = True
     browser_channel: Literal["auto", "chromium", "chrome", "msedge"] = "auto"

@@ -21,6 +21,14 @@ class VideoEngagementResult:
     error: str | None = None
 
 
+@dataclass
+class ShortListing:
+    video_id: str
+    title: str
+    url: str
+    thumbnail_url: str | None = None
+
+
 class YouTubeAutomation:
     _NAVIGATION_DESTROYED = "Execution context was destroyed"
 
@@ -34,12 +42,46 @@ class YouTubeAutomation:
         self.min_watch_seconds = min_watch_seconds
         self.browser_channel = browser_channel
 
+    _BLOCKED_URL_FRAGMENTS = (
+        "google-analytics",
+        "googletagmanager",
+        "doubleclick",
+        "googlesyndication",
+        "googleadservices",
+    )
+
     def _wait_page_settled(self, page: Page, timeout_ms: int = 5000) -> None:
         try:
             page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
         except Exception:
             pass
-        page.wait_for_timeout(300)
+        page.wait_for_timeout(100)
+
+    def _configure_fast_context(self, context) -> None:
+        def handle_route(route):
+            request = route.request
+            if request.resource_type in {"font", "stylesheet"}:
+                route.abort()
+                return
+            if any(fragment in request.url for fragment in self._BLOCKED_URL_FRAGMENTS):
+                route.abort()
+                return
+            route.continue_()
+
+        context.route("**/*", handle_route)
+
+    def _new_browser_context(self, browser):
+        context = browser.new_context(
+            viewport={"width": 1280, "height": 720},
+            locale="en-US",
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+        )
+        self._configure_fast_context(context)
+        return context
 
     def _safe_count(self, locator) -> int:
         try:
@@ -56,15 +98,35 @@ class YouTubeAutomation:
         self,
         email: str,
         password: str,
-        youtube_handle: str,
+        short_url: str,
     ) -> VideoEngagementResult:
-        # Sync Playwright in a worker thread avoids Windows asyncio subprocess errors
-        # when running inside FastAPI/uvicorn background tasks.
         return await asyncio.to_thread(
             self._run_account_sync,
             email,
             password,
+            short_url,
+        )
+
+    async def run_accounts_sequential(
+        self,
+        accounts: list[tuple[str, str]],
+        short_url: str,
+    ) -> list[tuple[str, VideoEngagementResult]]:
+        return await asyncio.to_thread(
+            self._run_accounts_sequential_sync,
+            accounts,
+            short_url,
+        )
+
+    async def list_channel_shorts(
+        self,
+        youtube_handle: str,
+        limit: int = 10,
+    ) -> tuple[str, list[ShortListing]]:
+        return await asyncio.to_thread(
+            self._list_channel_shorts_sync,
             youtube_handle,
+            limit,
         )
 
     def _normalize_youtube_handle(self, handle: str) -> tuple[str, str]:
@@ -88,11 +150,29 @@ class YouTubeAutomation:
         display_handle = raw if raw.startswith("@") else f"@{raw}"
         return f"https://www.youtube.com/{display_handle}/shorts", display_handle
 
+    def _execute_account_flow(
+        self,
+        page: Page,
+        email: str,
+        password: str,
+        short_url: str,
+    ) -> VideoEngagementResult:
+        self._login(page, email, password)
+        video_url, video_title = self._open_selected_short(page, short_url)
+        self._watch_video(page)
+        liked = self._like_video(page)
+        return VideoEngagementResult(
+            video_title=video_title,
+            video_url=video_url,
+            liked=liked,
+            status="success" if liked else "completed_without_like",
+        )
+
     def _run_account_sync(
         self,
         email: str,
         password: str,
-        youtube_handle: str,
+        short_url: str,
     ) -> VideoEngagementResult:
         with sync_playwright() as playwright:
             browser = launch_chromium_browser(
@@ -100,27 +180,10 @@ class YouTubeAutomation:
                 headless=self.headless,
                 channel_setting=self.browser_channel,
             )
-            context = browser.new_context(
-                viewport={"width": 1280, "height": 720},
-                locale="en-US",
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-            )
+            context = self._new_browser_context(browser)
             page = context.new_page()
             try:
-                self._login(page, email, password)
-                video_url, video_title = self._open_latest_short(page, youtube_handle)
-                self._watch_video(page)
-                liked = self._like_video(page)
-                return VideoEngagementResult(
-                    video_title=video_title,
-                    video_url=video_url,
-                    liked=liked,
-                    status="success" if liked else "completed_without_like",
-                )
+                return self._execute_account_flow(page, email, password, short_url)
             except Exception as exc:
                 logger.exception("Automation failed for %s", email)
                 return VideoEngagementResult(
@@ -133,6 +196,45 @@ class YouTubeAutomation:
             finally:
                 context.close()
                 browser.close()
+
+    def _run_accounts_sequential_sync(
+        self,
+        accounts: list[tuple[str, str]],
+        short_url: str,
+    ) -> list[tuple[str, VideoEngagementResult]]:
+        results: list[tuple[str, VideoEngagementResult]] = []
+        with sync_playwright() as playwright:
+            browser = launch_chromium_browser(
+                playwright,
+                headless=self.headless,
+                channel_setting=self.browser_channel,
+            )
+            try:
+                for email, password in accounts:
+                    context = self._new_browser_context(browser)
+                    page = context.new_page()
+                    try:
+                        result = self._execute_account_flow(page, email, password, short_url)
+                        results.append((email, result))
+                    except Exception as exc:
+                        logger.exception("Automation failed for %s", email)
+                        results.append(
+                            (
+                                email,
+                                VideoEngagementResult(
+                                    video_title="",
+                                    video_url=page.url if page else "",
+                                    liked=False,
+                                    status="failed",
+                                    error=str(exc),
+                                ),
+                            )
+                        )
+                    finally:
+                        context.close()
+            finally:
+                browser.close()
+        return results
 
     def _wait_for_email_input(self, page: Page):
         candidates = [
@@ -259,9 +361,9 @@ class YouTubeAutomation:
                 page.wait_for_timeout(2000)
                 continue
 
-            page.wait_for_timeout(1500)
+            page.wait_for_timeout(700)
             try:
-                page.wait_for_load_state("domcontentloaded", timeout=5000)
+                page.wait_for_load_state("domcontentloaded", timeout=3000)
             except Exception:
                 pass
 
@@ -304,29 +406,35 @@ class YouTubeAutomation:
         )
 
     def _login(self, page: Page, email: str, password: str) -> None:
-        page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(2000)
+        page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=45000)
+        self._wait_page_settled(page, timeout_ms=5000)
+
+        avatar = page.locator("#avatar-btn, button#avatar-btn")
+        if self._has_matches(avatar):
+            return
 
         sign_in = page.locator(
             'a[aria-label="Sign in"], tp-yt-paper-button:has-text("Sign in"), '
             'button:has-text("Sign in"), ytd-button-renderer a:has-text("Sign in")'
         ).first
         if not self._has_matches(sign_in):
-            avatar = page.locator("#avatar-btn, button#avatar-btn")
-            if self._has_matches(avatar):
-                return
-            raise RuntimeError("Sign in button not found on YouTube homepage")
-
-        sign_in.click(timeout=15000)
-        page.wait_for_url(re.compile(r"accounts\.google\.com"), timeout=30000)
-        self._wait_page_settled(page, timeout_ms=30000)
+            page.goto(
+                "https://accounts.google.com/ServiceLogin?service=youtube&continue="
+                "https://www.youtube.com/&hl=en",
+                wait_until="domcontentloaded",
+                timeout=45000,
+            )
+        else:
+            sign_in.click(timeout=10000)
+            page.wait_for_url(re.compile(r"accounts\.google\.com"), timeout=20000)
+        self._wait_page_settled(page, timeout_ms=10000)
 
         email_input = self._wait_for_email_input(page)
         email_input.fill(email)
         self._click_next(page)
 
-        page.wait_for_load_state("domcontentloaded", timeout=30000)
-        page.wait_for_timeout(1500)
+        page.wait_for_load_state("domcontentloaded", timeout=20000)
+        page.wait_for_timeout(500)
 
         if self._has_matches(page.locator("text=Couldn't find your Google Account")):
             raise RuntimeError("Google account not found for the provided email.")
@@ -334,10 +442,108 @@ class YouTubeAutomation:
         password_input = self._wait_for_password_input(page)
         password_input.fill(password)
         self._click_next(page)
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(800)
         self._finish_google_login(page)
 
     _CHANNEL_SHORT_SELECTOR = 'ytd-rich-item-renderer a[href*="/shorts/"]'
+
+    def _normalize_short_url(self, short_url: str) -> tuple[str, str]:
+        raw = short_url.strip()
+        if not raw:
+            raise ValueError("Short URL is required")
+
+        if not raw.startswith("http"):
+            raw = f"https://www.youtube.com{raw if raw.startswith('/') else f'/shorts/{raw}'}"
+
+        match = re.search(r"/shorts/([A-Za-z0-9_-]{5,})", raw)
+        if not match:
+            raise ValueError(f"Invalid Short URL: {short_url}")
+
+        video_id = match.group(1)
+        return video_id, f"https://www.youtube.com/shorts/{video_id}"
+
+    def _collect_channel_shorts_from_page(self, page: Page, limit: int) -> list[ShortListing]:
+        raw_items = page.evaluate(
+            """(limit) => {
+                const seen = new Set();
+                const results = [];
+                const anchors = document.querySelectorAll(
+                    'ytd-rich-item-renderer a[href*="/shorts/"]'
+                );
+                for (const anchor of anchors) {
+                    const href = anchor.href || anchor.getAttribute('href') || '';
+                    const match = href.match(/\\/shorts\\/([A-Za-z0-9_-]{5,})/);
+                    if (!match || seen.has(match[1])) continue;
+                    seen.add(match[1]);
+                    const videoId = match[1];
+                    const url = href.startsWith('http')
+                        ? href.split('?')[0]
+                        : `https://www.youtube.com/shorts/${videoId}`;
+                    const img = anchor.querySelector('img');
+                    const label = (anchor.getAttribute('aria-label') || anchor.getAttribute('title') || '').trim();
+                    results.push({
+                        videoId,
+                        url,
+                        title: label || `Short ${videoId}`,
+                        thumbnailUrl: img?.src || null,
+                    });
+                    if (results.length >= limit) break;
+                }
+                return results;
+            }""",
+            limit,
+        )
+        return [
+            ShortListing(
+                video_id=item["videoId"],
+                title=item["title"],
+                url=item["url"],
+                thumbnail_url=item.get("thumbnailUrl"),
+            )
+            for item in raw_items
+        ]
+
+    def _list_channel_shorts_sync(
+        self,
+        youtube_handle: str,
+        limit: int = 10,
+    ) -> tuple[str, list[ShortListing]]:
+        shorts_url, display_handle = self._normalize_youtube_handle(youtube_handle)
+
+        with sync_playwright() as playwright:
+            browser = launch_chromium_browser(
+                playwright,
+                headless=self.headless,
+                channel_setting=self.browser_channel,
+            )
+            page = browser.new_page(
+                viewport={"width": 1280, "height": 720},
+                locale="en-US",
+            )
+            try:
+                page.goto(shorts_url, wait_until="domcontentloaded", timeout=45000)
+                self._wait_page_settled(page, timeout_ms=5000)
+
+                shorts: list[ShortListing] = []
+                for _ in range(3):
+                    try:
+                        page.wait_for_selector(self._CHANNEL_SHORT_SELECTOR, state="attached", timeout=6000)
+                    except Exception:
+                        pass
+
+                    shorts = self._collect_channel_shorts_from_page(page, limit)
+                    if len(shorts) >= limit:
+                        break
+
+                    page.mouse.wheel(0, 1200)
+                    self._wait_page_settled(page, timeout_ms=2000)
+
+                if not shorts:
+                    raise RuntimeError(f"No Shorts found for channel {display_handle}")
+
+                return display_handle, shorts[:limit]
+            finally:
+                browser.close()
 
     def _get_latest_short_from_channel(self, page: Page) -> tuple[str, str]:
         short_data = page.evaluate(
@@ -381,6 +587,16 @@ class YouTubeAutomation:
         )
         return title or ""
 
+    def _open_selected_short(self, page: Page, short_url: str) -> tuple[str, str]:
+        video_id, target_url = self._normalize_short_url(short_url)
+        logger.info("Opening selected Short: %s", target_url)
+        page.goto(target_url, wait_until="domcontentloaded", timeout=45000)
+        page.wait_for_url(re.compile(rf"/shorts/{re.escape(video_id)}"), timeout=20000)
+        self._wait_for_shorts_player(page)
+
+        title = self._extract_shorts_title(page) or f"Short {video_id}"
+        return page.url or target_url, title.strip()
+
     def _open_latest_short(self, page: Page, youtube_handle: str) -> tuple[str, str]:
         shorts_url, display_handle = self._normalize_youtube_handle(youtube_handle)
 
@@ -418,23 +634,23 @@ class YouTubeAutomation:
         return page.url or video_url or target_url, title.strip()
 
     def _wait_for_shorts_player(self, page: Page) -> None:
-        self._wait_page_settled(page, timeout_ms=10000)
+        self._wait_page_settled(page, timeout_ms=5000)
         try:
-            page.wait_for_selector("video", state="visible", timeout=15000)
+            page.wait_for_selector("video", state="visible", timeout=8000)
         except Exception:
             pass
         try:
             page.wait_for_selector(
                 "like-button-view-model button, ytd-shorts h2",
                 state="attached",
-                timeout=15000,
+                timeout=8000,
             )
         except Exception:
             pass
-        page.wait_for_timeout(1500)
+        page.wait_for_timeout(600)
 
     def _watch_video(self, page: Page) -> None:
-        self._wait_page_settled(page, timeout_ms=10000)
+        self._wait_page_settled(page, timeout_ms=3000)
         player = page.locator("video").first
         if self._has_matches(player):
             try:
@@ -485,8 +701,8 @@ class YouTubeAutomation:
             except Exception:
                 return False
 
-        for _ in range(4):
-            page.wait_for_timeout(750)
+        for _ in range(3):
+            page.wait_for_timeout(400)
             if self._is_liked(button):
                 logger.info("Short liked successfully")
                 return True

@@ -1,16 +1,28 @@
 import { useEffect, useRef, useState } from "react";
-import { checkHealth, getWorkflowStatus, startWorkflow } from "../api";
+import {
+  checkHealth,
+  fetchChannelShorts,
+  getWorkflowStatus,
+  parseAccountsList,
+  startWorkflow,
+} from "../api";
 import ProgressFeed from "./ProgressFeed";
 import ResultsTable from "./ResultsTable";
+import ShortsPicker from "./ShortsPicker";
 import "./Dashboard.css";
 
-const POLL_INTERVAL_MS = 2000;
+const POLL_INTERVAL_MS = 1500;
 
 export default function Dashboard() {
   const [youtubeHandle, setYoutubeHandle] = useState("");
+  const [accountMode, setAccountMode] = useState("single");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [accountsText, setAccountsText] = useState("");
   const [executionMode, setExecutionMode] = useState("sequential");
+  const [shorts, setShorts] = useState([]);
+  const [selectedShort, setSelectedShort] = useState(null);
+  const [isLoadingShorts, setIsLoadingShorts] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [jobId, setJobId] = useState(null);
   const [progress, setProgress] = useState([]);
@@ -65,6 +77,49 @@ export default function Dashboard() {
     }, POLL_INTERVAL_MS);
   };
 
+  const parsedAccounts = parseAccountsList(accountsText);
+  const hasSingleCredentials = email.trim() && password.trim();
+  const hasMultiCredentials = parsedAccounts.length > 0;
+  const accountsReady = accountMode === "single" ? hasSingleCredentials : hasMultiCredentials;
+  const canRunWorkflow =
+    apiOnline !== false &&
+    youtubeHandle.trim() &&
+    selectedShort &&
+    accountsReady &&
+    !isRunning;
+
+  const handleLoadShorts = async () => {
+    setError("");
+    setShorts([]);
+    setSelectedShort(null);
+
+    if (!youtubeHandle.trim()) {
+      setError("YouTube handle is required before loading Shorts.");
+      return;
+    }
+
+    setIsLoadingShorts(true);
+    try {
+      const data = await fetchChannelShorts(youtubeHandle, 10);
+      setShorts(data.shorts || []);
+      if (!data.shorts?.length) {
+        setError("No Shorts were found for this channel.");
+      }
+    } catch (loadError) {
+      let message =
+        loadError.response?.data?.detail ||
+        loadError.message ||
+        "Failed to load Shorts.";
+      if (loadError.response?.status === 404) {
+        message =
+          "Shorts API not found. Restart the backend server so it picks up the latest code, then try again.";
+      }
+      setError(typeof message === "string" ? message : JSON.stringify(message));
+    } finally {
+      setIsLoadingShorts(false);
+    }
+  };
+
   const handleRunWorkflow = async () => {
     setError("");
     setProgress([]);
@@ -72,7 +127,19 @@ export default function Dashboard() {
     setStatus(null);
 
     if (!youtubeHandle.trim()) {
-      setError("YouTube handle is required (e.g. @channelname).");
+      setError("YouTube handle is required.");
+      return;
+    }
+    if (!selectedShort?.url) {
+      setError("Select a Short before running the workflow.");
+      return;
+    }
+    if (!accountsReady) {
+      setError(
+        accountMode === "single"
+          ? "Email and password are required for single account mode."
+          : "Add at least one account in email,password format for multi account mode.",
+      );
       return;
     }
 
@@ -81,8 +148,11 @@ export default function Dashboard() {
     try {
       const response = await startWorkflow({
         youtubeHandle,
+        shortUrl: selectedShort.url,
+        accountMode,
         email,
         password,
+        accounts: parsedAccounts,
         executionMode,
       });
       setJobId(response.job_id);
@@ -97,8 +167,6 @@ export default function Dashboard() {
     }
   };
 
-  const usingFrontendCredentials = email.trim() && password.trim();
-
   return (
     <div className="dashboard">
       <header className="hero">
@@ -106,7 +174,8 @@ export default function Dashboard() {
           <p className="eyebrow">YouTube Engagement Automation</p>
           <h1>Workflow Dashboard</h1>
           <p className="subtitle">
-            Run browser automation to watch and like the most recent Short from a YouTube channel.
+            Load recent Shorts from a channel, choose one to target, then run the workflow for one
+            or many accounts.
           </p>
         </div>
         <div className={`api-status ${apiOnline ? "online" : "offline"}`}>
@@ -116,7 +185,7 @@ export default function Dashboard() {
 
       <section className="panel controls">
         <div className="panel-header">
-          <h2>Run Workflow</h2>
+          <h2>Setup</h2>
         </div>
 
         <div className="form-grid">
@@ -126,31 +195,25 @@ export default function Dashboard() {
               type="text"
               placeholder="@channelname"
               value={youtubeHandle}
-              onChange={(event) => setYoutubeHandle(event.target.value)}
-              disabled={isRunning}
+              onChange={(event) => {
+                setYoutubeHandle(event.target.value);
+                setShorts([]);
+                setSelectedShort(null);
+              }}
+              disabled={isRunning || isLoadingShorts}
             />
           </label>
 
           <label>
-            Test Email
-            <input
-              type="email"
-              placeholder="user@gmail.com"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
+            Account Mode
+            <select
+              value={accountMode}
+              onChange={(event) => setAccountMode(event.target.value)}
               disabled={isRunning}
-            />
-          </label>
-
-          <label>
-            Test Password
-            <input
-              type="password"
-              placeholder="Leave empty to use Google Drive file"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              disabled={isRunning}
-            />
+            >
+              <option value="single">Single Account</option>
+              <option value="multi">Multiple Accounts</option>
+            </select>
           </label>
 
           <label>
@@ -164,31 +227,84 @@ export default function Dashboard() {
               <option value="parallel">Parallel</option>
             </select>
           </label>
+
+          {accountMode === "single" ? (
+            <>
+              <label>
+                Email
+                <input
+                  type="email"
+                  placeholder="user@gmail.com"
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  disabled={isRunning}
+                  autoComplete="username"
+                />
+              </label>
+
+              <label>
+                Password
+                <input
+                  type="password"
+                  placeholder="Account password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  disabled={isRunning}
+                  autoComplete="current-password"
+                />
+              </label>
+            </>
+          ) : (
+            <label className="full-width">
+              Accounts List
+              <textarea
+                rows={5}
+                placeholder={"user1@gmail.com,password1\nuser2@gmail.com,password2"}
+                value={accountsText}
+                onChange={(event) => setAccountsText(event.target.value)}
+                disabled={isRunning}
+              />
+            </label>
+          )}
         </div>
 
-        <p className="hint">
-          Each account will open <strong>{youtubeHandle.trim() || "@channel"}</strong>, watch the latest
-          Short, and like it.
-          {" "}
-          {usingFrontendCredentials
-            ? "Credentials provided — workflow will run for this single test account."
-            : "Email and password empty — workflow will load all accounts from the Google Drive credentials file."}
-        </p>
+        {accountMode === "multi" && (
+          <p className="hint">
+            One account per line using <code>email,password</code>. Parsed accounts:{" "}
+            {parsedAccounts.length}
+          </p>
+        )}
+
+        <div className="action-row">
+          <button
+            type="button"
+            className="accent-button"
+            onClick={handleLoadShorts}
+            disabled={isRunning || isLoadingShorts || apiOnline === false || !youtubeHandle.trim()}
+          >
+            {isLoadingShorts ? "Loading Shorts..." : "Load Recent Shorts"}
+          </button>
+        </div>
 
         {error && <div className="alert error">{error}</div>}
-
-        <button
-          className="primary-button"
-          onClick={handleRunWorkflow}
-          disabled={isRunning || apiOnline === false || !youtubeHandle.trim()}
-        >
-          {isRunning ? "Workflow Running..." : "Run Workflow"}
-        </button>
-
         {jobId && <p className="muted job-id">Job ID: {jobId}</p>}
       </section>
 
-      <ProgressFeed events={progress} isRunning={isRunning} />
+      <ShortsPicker
+        shorts={shorts}
+        selectedShortUrl={selectedShort?.url}
+        onSelect={setSelectedShort}
+        isLoading={isLoadingShorts}
+        handle={youtubeHandle.trim() || "@channel"}
+      />
+
+      <ProgressFeed
+        events={progress}
+        isRunning={isRunning}
+        onRunWorkflow={handleRunWorkflow}
+        canRunWorkflow={canRunWorkflow}
+        selectedShort={selectedShort}
+      />
       <ResultsTable results={results} />
 
       {status === "completed" && !isRunning && (

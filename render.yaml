@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: youtube-automation
+    runtime: docker
+    plan: starter
+    healthCheckPath: /api/health
+    envVars:
+      - key: SERVE_FRONTEND
+        value: "true"
+      - key: HEADLESS
+        value: "true"
+      - key: MIN_WATCH_SECONDS
+        value: "15"
+      - key: BROWSER_CHANNEL
+        value: chromium
+      - key: CORS_ORIGINS
+        value: "*"

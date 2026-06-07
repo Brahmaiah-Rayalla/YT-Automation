@@ -9,15 +9,35 @@ const client = axios.create({
   },
 });
 
-export async function startWorkflow({ youtubeHandle, email, password, executionMode }) {
+export async function fetchChannelShorts(youtubeHandle, limit = 10) {
+  const response = await client.post("/api/shorts/list", {
+    youtube_handle: youtubeHandle.trim(),
+    limit,
+  });
+  return response.data;
+}
+
+export async function startWorkflow({
+  youtubeHandle,
+  shortUrl,
+  accountMode,
+  email,
+  password,
+  accounts,
+  executionMode,
+}) {
   const payload = {
     youtube_handle: youtubeHandle.trim(),
+    short_url: shortUrl,
+    account_mode: accountMode,
     execution_mode: executionMode || undefined,
   };
 
-  if (email?.trim() && password?.trim()) {
+  if (accountMode === "single") {
     payload.email = email.trim();
     payload.password = password.trim();
+  } else {
+    payload.accounts = accounts;
   }
 
   const response = await client.post("/api/workflow/run", payload);
@@ -32,4 +52,22 @@ export async function getWorkflowStatus(jobId) {
 export async function checkHealth() {
   const response = await client.get("/api/health");
   return response.data;
+}
+
+export function parseAccountsList(text) {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const commaIndex = line.indexOf(",");
+      if (commaIndex === -1) {
+        return null;
+      }
+      return {
+        email: line.slice(0, commaIndex).trim(),
+        password: line.slice(commaIndex + 1).trim(),
+      };
+    })
+    .filter((account) => account?.email && account?.password);
 }
